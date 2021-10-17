@@ -1,169 +1,251 @@
 package client;
 
 import javafx.application.Platform;
+import javafx.event.ActionEvent;
+import javafx.event.EventHandler;
 import javafx.fxml.FXML;
-import javafx.scene.control.*;
+import javafx.fxml.FXMLLoader;
+import javafx.fxml.Initializable;
+import javafx.scene.Parent;
+import javafx.scene.Scene;
+import javafx.scene.control.ListView;
+import javafx.scene.control.PasswordField;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.HBox;
+import javafx.stage.Modality;
+import javafx.stage.Stage;
+import javafx.stage.StageStyle;
+import javafx.stage.WindowEvent;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.Socket;
+import java.net.URL;
+import java.util.ResourceBundle;
 
-public class Controller {
+public class Controller implements Initializable {
     @FXML
-    TextArea chatArea;
-
+    private ListView<String> clientList;
     @FXML
-    TextField messageField, loginField;
-
+    private TextArea textArea;
     @FXML
-    HBox authPanel, msgPanel;
-
+    private TextField textField;
     @FXML
-    PasswordField passwordField;
-
+    private TextField loginField;
     @FXML
-    ListView<String> clientsListView;
+    private PasswordField passwordField;
+    @FXML
+    private HBox authPanel;
+    @FXML
+    private HBox msgPanel;
 
     private Socket socket;
+    private final int PORT = 8189;
+    private final String IP_ADDRESS = "localhost";
     private DataInputStream in;
     private DataOutputStream out;
 
-    public void setAuthorized(boolean authorized) {
-        msgPanel.setVisible(authorized);
-        msgPanel.setManaged(authorized);
-        authPanel.setVisible(!authorized);
-        authPanel.setManaged(!authorized);
-        clientsListView.setVisible(authorized);
-        clientsListView.setManaged(authorized);
+    private boolean authenticated;
+    private String nickname;
+    private Stage stage;
+    private Stage regStage;
+    private RegController regController;
+    private String login;
+
+    public void setAuthenticated(boolean authenticated) {
+        this.authenticated = authenticated;
+        authPanel.setVisible(!authenticated);
+        authPanel.setManaged(!authenticated);
+        msgPanel.setVisible(authenticated);
+        msgPanel.setManaged(authenticated);
+        clientList.setVisible(authenticated);
+        clientList.setManaged(authenticated);
+
+        if (!authenticated) {
+
+            nickname = "";
+            MessageStory.stop();
+        }
+        setTitle(nickname);
+        textArea.clear();
     }
 
-    public void sendMessage() {
-        try {
-            out.writeUTF(messageField.getText());
-            messageField.clear();
-            messageField.requestFocus();
-        } catch (IOException e) {
-            showError("Невозможно отправить сообщение на сервер");
-        }
+    @Override
+    public void initialize(URL location, ResourceBundle resources) {
+        Platform.runLater(() -> {
+            stage = (Stage) textField.getScene().getWindow();
+            stage.setOnCloseRequest(new EventHandler<WindowEvent>() {
+                @Override
+                public void handle(WindowEvent event) {
+                    System.out.println("bye");
+                    if (socket != null && !socket.isClosed()) {
+                        try {
+                            out.writeUTF("/end");
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                }
+            });
+        });
+        setAuthenticated(false);
     }
 
-    public void sendCloseRequest() {
+    private void connect() {
         try {
-            if (out != null) {
-                out.writeUTF("/exit");
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    public void tryToAuth() {
-        if (!connect()) {
-            return;
-        }
-        try {
-            out.writeUTF("/auth " + loginField.getText() + " " + passwordField.getText());
-            loginField.clear();
-            passwordField.clear();
-        } catch (IOException e) {
-            showError("Невозможно отправить запрос авторизации на сервер");
-        }
-    }
-
-    public boolean connect() {
-        if (socket != null && !socket.isClosed()) {
-            return true;
-        }
-        try {
-            socket = new Socket("localhost", 8189);
+            socket = new Socket(IP_ADDRESS, PORT);
             in = new DataInputStream(socket.getInputStream());
             out = new DataOutputStream(socket.getOutputStream());
-            new Thread(Controller.this::logic).start();
-            return true;
-        } catch (IOException e) {
-            showError("Невозможно подключиться к серверу");
-            return false;
-        }
-    }
 
-    private void logic() {
-        try {
-            while (true) {
-                String inputMessage = in.readUTF();
-                if (inputMessage.equals("/exit")) {
-                    closeConnection();
-                }
-                if (inputMessage.startsWith("/authok ")) {
-                    String myUsername = inputMessage.split("\\s+")[1];
-                    setAuthorized(true);
-                    break;
-                }
-                chatArea.appendText(inputMessage + "\n");
-            }
-            while (true) {
-                String inputMessage = in.readUTF();
-                if (inputMessage.startsWith("/")) {
-                    if (inputMessage.equals("/exit")) {
-                        break;
-                    }
-                    if (inputMessage.startsWith("/clients_list ")) {
-                        Platform.runLater(() -> {
-                            String[] tokens = inputMessage.split("\\s+");
-                            clientsListView.getItems().clear();
-                            for (int i = 1; i < tokens.length; i++) {
-                                clientsListView.getItems().add(tokens[i]);
+            new Thread(() -> {
+                try {
+                    while (true) {
+                        String str = in.readUTF();
+                        if (str.startsWith("/")) {
+                            if (str.equals("/end")) {
+                                break;
                             }
-                        });
+                            if (str.startsWith("/authok")) {
+                                nickname = str.split("\\s")[1];
+                                setAuthenticated(true);
+                                textArea.appendText(MessageStory.showStory(login));
+                                MessageStory.start(login);
+                                break;
+                            }
+                            if (str.equals("/regok")) {
+                                regController.regResult("Регистрация прошла успешно");
+                            }
+                            if (str.equals("/regno")) {
+                                regController.regResult("Логин или никнейм уже заняты");
+                            }
+                        } else {
+                            textArea.appendText(str + "\n");
+                        }
                     }
-                    continue;
+                    while (authenticated) {
+                        String str = in.readUTF();
+                        if (str.startsWith("/")) {
+                            if (str.equals("/end")) {
+                                break;
+                            }
+                            if (str.startsWith("/clientlist ")) {
+                                String[] token = str.split("\\s+");
+                                Platform.runLater(() -> {
+                                    clientList.getItems().clear();
+                                    for (int i = 1; i < token.length; i++) {
+                                        clientList.getItems().add(token[i]);
+                                    }
+                                });
+                            }
+                            if (str.startsWith("/yournickis ")) {
+                                nickname = str.split(" ")[1];
+                                setTitle(nickname);
+                            }
+                        } else {
+                            textArea.appendText(str + "\n");
+                            MessageStory.writeMessage(str);
+                        }
+                    }
+
+                } catch (IOException e) {
+                    e.printStackTrace();
+                } finally {
+                    System.out.println("disconnected");
+                    setAuthenticated(false);
+                    try {
+                        socket.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
                 }
-                chatArea.appendText(inputMessage + "\n");
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            closeConnection();
-        }
-    }
+            }).start();
 
-    private void closeConnection() {
-        setAuthorized(false);
-        try {
-            if (in != null) {
-                in.close();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        try {
-            if (out != null) {
-                out.close();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        try {
-            if (socket != null) {
-                socket.close();
-            }
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    public void showError(String message) {
-        new Alert(Alert.AlertType.ERROR, message, ButtonType.OK).showAndWait();
+    @FXML
+    public void sendMsg(ActionEvent actionEvent) {
+        try {
+            out.writeUTF(textField.getText());
+            textField.clear();
+            textField.requestFocus();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
-    public void clientsListDoubleClick(MouseEvent mouseEvent) {
-        if (mouseEvent.getClickCount() == 2) {
-            String selectedUser = clientsListView.getSelectionModel().getSelectedItem();
-            messageField.setText("/w " + selectedUser + " ");
-            messageField.requestFocus();
-            messageField.selectEnd();
+    public void tryToAuth(ActionEvent actionEvent) {
+        if (socket == null || socket.isClosed()) {
+            connect();
+        }
+
+       login = loginField.getText().trim();
+        String password = passwordField.getText().trim();
+        String msg = String.format("/auth %s %s", login, password);
+
+        try {
+            out.writeUTF(msg);
+            passwordField.clear();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void setTitle(String nickname) {
+        Platform.runLater(() -> {
+            if (!nickname.equals("")) {
+                stage.setTitle(String.format("Home Chat[ %s ]", nickname));
+            } else {
+                stage.setTitle("Home Chat");
+            }
+        });
+    }
+
+    public void clientListClick(MouseEvent mouseEvent) {
+        String receiver = clientList.getSelectionModel().getSelectedItem();
+        textField.setText(String.format("/w %s ", receiver));
+    }
+
+    private void createRegWindow() {
+        try {
+            FXMLLoader fxmlLoader = new FXMLLoader(getClass().getResource("/reg.fxml"));
+            Parent root = fxmlLoader.load();
+            regStage = new Stage();
+            regStage.setTitle("Home Chat registration");
+            regStage.setScene(new Scene(root, 600, 400));
+            regController = fxmlLoader.getController();
+            regController.setController(this);
+
+            regStage.initStyle(StageStyle.UTILITY);
+            regStage.initModality(Modality.APPLICATION_MODAL);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void showRegWindow(ActionEvent actionEvent) {
+        if (regStage == null) {
+            createRegWindow();
+        }
+        regStage.show();
+    }
+
+    public void registration(String login, String password, String nickname){
+        String msg = String.format("/reg %s %s %s",login, password, nickname);
+
+        if (socket == null || socket.isClosed()) {
+            connect();
+        }
+
+        try {
+            out.writeUTF(msg);
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 }

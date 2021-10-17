@@ -6,117 +6,136 @@ import java.io.IOException;
 import java.net.Socket;
 
 public class ClientHandler {
-    private Server server;
-    private Socket socket;
-    private String username;
-    private DataInputStream in;
-    private DataOutputStream out;
+    Socket socket;
+    Server server;
+    DataInputStream in;
+    DataOutputStream out;
 
-    public String getUsername() {
-        return username;
-    }
+    private boolean authenticated;
+    private String nickname;
+    private String login;
 
-    public ClientHandler(Server server, Socket socket) {
+    public ClientHandler(Socket socket, Server server) {
         try {
-            this.server = server;
             this.socket = socket;
-            this.in = new DataInputStream(socket.getInputStream());
-            this.out = new DataOutputStream(socket.getOutputStream());
-            new Thread(() -> logic()).start();
+            this.server = server;
+
+            in = new DataInputStream(socket.getInputStream());
+            out = new DataOutputStream(socket.getOutputStream());
+
+            new Thread(() -> {
+                try {
+                    while (true) {
+                        String str = in.readUTF();
+
+                        if (str.equals("/end")) {
+                            sendMsg("/end");
+                            System.out.println("Client disconnected");
+                            break;
+                        }
+                        if (str.startsWith("/auth ")) {
+                            String[] token = str.split("\\s+");
+                            nickname = server.getAuthService()
+                                    .getNicknameByLoginAndPassword(token[1], token[2]);
+                            login = token[1];
+                            if (nickname != null) {
+                                if (!server.isLoginAuthenticated(login)) {
+                                    sendMsg("/authok " + nickname);
+                                    server.subscribe(this);
+                                    authenticated = true;
+                                    sendMsg(SQLHandler.getMessageForNick(nickname));
+                                    break;
+                                } else {
+                                    sendMsg("С этим логином уже вошли");
+                                }
+                            } else {
+                                sendMsg("Неверный логин / пароль");
+                            }
+                        }
+
+                        if (str.startsWith("/reg ")) {
+                            String[] token = str.split("\\s+");
+                            if (token.length < 4) {
+                                continue;
+                            }
+
+                            boolean regOk = server.getAuthService().
+                                    registration(token[1], token[2], token[3]);
+                            if (regOk) {
+                                sendMsg("/regok");
+                            } else {
+                                sendMsg("/regno");
+                            }
+                        }
+                    }
+                    while (authenticated) {
+                        String str = in.readUTF();
+
+                        if (str.startsWith("/")) {
+                            if (str.equals("/end")) {
+                                sendMsg("/end");
+                                System.out.println("Client disconnected");
+                                break;
+                            }
+
+                            if (str.startsWith("/w")) {
+                                String[] token = str.split("\\s+", 3);
+                                if (token.length < 3) {
+                                    continue;
+                                }
+                                server.privateMsg(this, token[1], token[2]);
+                            }
+                            if (str.startsWith("/chnick ")) {
+                                String[] token = str.split("\\s+", 2);
+                                if (token.length < 2) {
+                                    continue;
+                                }
+                                if (token[1].contains(" ")) {
+                                    sendMsg("Ник не может содержать пробелов");
+                                    continue;
+                                }
+                                if (server.getAuthService().changeNick(this.nickname, token[1])) {
+                                    sendMsg("/yournickis " + token[1]);
+                                    sendMsg("Ваш ник изменен на " + token[1]);
+                                    this.nickname = token[1];
+                                    server.broadcastClientList();
+                                } else {
+                                    sendMsg("Не удалось изменить ник. Ник " + token[1] + " уже существует");
+                                }
+                            }
+                        } else {
+                            server.broadcastMsg(this, str);
+                        }
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                } finally {
+                    server.unsubscribe(this);
+                    try {
+                        socket.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }).start();
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    public void sendMessage(String message) {
+    public void sendMsg(String msg) {
         try {
-            out.writeUTF(message);
+            out.writeUTF(msg);
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void logic() {
-        try {
-            while (!consumeAuthorizeMessage(in.readUTF()));
-            while (consumeRegularMessage(in.readUTF()));
-        } catch (IOException e) {
-            e.printStackTrace();
-        } finally {
-            System.out.println("Клиент " + username + " отключился");
-            server.unsubscribe(this);
-            closeConnection();
-        }
+    public String getNickname() {
+        return nickname;
     }
 
-    private boolean consumeRegularMessage(String inputMessage) {
-        if (inputMessage.startsWith("/")) {
-            if (inputMessage.equals("/exit")) {
-                sendMessage("/exit");
-                return false;
-            }
-            if (inputMessage.startsWith("/w ")) {
-                String[] tokens = inputMessage.split("\\s+", 3);
-                server.sendPersonalMessage(this, tokens[1], tokens[2]);
-            }
-            return true;
-        }
-        server.broadcastMessage(username + ": " + inputMessage);
-        return true;
-    }
-
-    private boolean consumeAuthorizeMessage(String message) {
-
-
-        if (message.startsWith("/auth ")) {
-            String[] tokens = message.split("\\s+");
-            if (tokens.length != 3) {
-                sendMessage("SERVER: Неверно сформирована команда на авторизацию");
-                return false;
-            }
-            String login = tokens[1];
-            String password = tokens[2];
-
-            String selectedUsername = server.getAuthenticationProvider().getUsernameByLoginAndPassword(login, password);
-            if (selectedUsername == null) {
-                sendMessage("SERVER: Неверно указан логин/пароль");
-                return false;
-            }
-            if (server.isUsernameUsed(selectedUsername)) {
-                sendMessage("SERVER: Данное имя пользователя уже занято");
-                return false;
-            }
-            username = selectedUsername;
-            sendMessage("/authok " + username);
-            server.subscribe(this);
-            return true;
-        } else {
-            sendMessage("SERVER: Вам необходимо авторизоваться");
-            return false;
-        }
-    }
-
-    private void closeConnection() {
-        try {
-            if (in != null) {
-                in.close();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        try {
-            if (out != null) {
-                out.close();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        try {
-            if (socket != null) {
-                socket.close();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+    public String getLogin() {
+        return login;
     }
 }
