@@ -3,85 +3,100 @@ package server;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class Server {
-    private AuthenticationProvider authenticationProvider;
-    private List<ClientHandler> clients;
+    private ServerSocket server;
+    private Socket socket;
+    private final int PORT = 8189;
 
-    public AuthenticationProvider getAuthenticationProvider() {
-        return authenticationProvider;
-    }
+    private List<ClientHandler> clients;
+    private AuthService authService;
 
     public Server() {
+        clients = new CopyOnWriteArrayList<>();
+//        authService = new SimpleAuthService();
+        if (!SQLHandler.connect()) {
+            throw new RuntimeException("Не удалось подключиться к БД");
+        }
+        authService = new DBAuthServise();
         try {
-            this.authenticationProvider = new DbAuthenticationProvider();
-            this.authenticationProvider.init();
-            this.clients = new ArrayList<>();
-            ServerSocket serverSocket = new ServerSocket(8189);
-            System.out.println("Сервер запущен. Ожидаем подключение клиентов..");
+            server = new ServerSocket(PORT);
+            System.out.println("Server started!");
+
             while (true) {
-                Socket socket = serverSocket.accept();
-                System.out.println("Подключился новый клиент");
-                new ClientHandler(this, socket);
+                socket = server.accept();
+                System.out.println("Client connected");
+                new ClientHandler(socket, this);
             }
         } catch (IOException e) {
             e.printStackTrace();
-        }finally {
-            this.authenticationProvider.shutdown();
-        }
-    }
-
-    public synchronized void subscribe(ClientHandler c) {
-        broadcastMessage("В чат зашел пользователь " + c.getUsername());
-        clients.add(c);
-        broadcastClientList();
-    }
-
-    public synchronized void unsubscribe(ClientHandler c) {
-        clients.remove(c);
-        broadcastMessage("Из чата вышел пользователь " + c.getUsername());
-        broadcastClientList();
-    }
-
-    public synchronized void broadcastMessage(String message) {
-        for (ClientHandler c : clients) {
-            c.sendMessage(message);
-        }
-    }
-
-    public synchronized void broadcastClientList() {
-        StringBuilder builder = new StringBuilder(clients.size() * 10);
-        builder.append("/clients_list ");
-        for (ClientHandler c : clients) {
-            builder.append(c.getUsername()).append(" ");
-        }
-        String clientsListStr = builder.toString();
-        broadcastMessage(clientsListStr);
-    }
-
-    public synchronized boolean isUsernameUsed(String username) {
-        for (ClientHandler c : clients) {
-            if (c.getUsername().equalsIgnoreCase(username)) {
-                return true;
+        } finally {
+            SQLHandler.disconnect();
+            try {
+                server.close();
+            } catch (IOException e) {
+                e.printStackTrace();
             }
+        }
+    }
+
+    public void broadcastMsg(ClientHandler sender, String msg) {
+        String message = String.format("[ %s ]: %s", sender.getNickname(), msg);
+        SQLHandler.addMessage(sender.getNickname(), "null", msg, "once upon a time");
+        for (ClientHandler c : clients) {
+            c.sendMsg(message);
+        }
+    }
+
+    public void privateMsg(ClientHandler sender, String receiver, String msg) {
+        String message = String.format("[ %s ] to [ %s ] : %s", sender.getNickname(), receiver, msg);
+        for (ClientHandler c : clients) {
+            if (c.getNickname().equals(receiver)) {
+                c.sendMsg(message);
+                SQLHandler.addMessage(sender.getNickname(), receiver, msg, "once upon a time");
+                if (!c.equals(sender)) {
+                    sender.sendMsg(message);
+                }
+                return;
+            }
+        }
+        sender.sendMsg("Not found user: "+ receiver);
+    }
+
+    public boolean isLoginAuthenticated(String login) {
+        for (ClientHandler c : clients) {
+           if(c.getLogin().equals(login)){
+               return true;
+           }
         }
         return false;
     }
 
-    public synchronized void sendPersonalMessage(ClientHandler sender, String receiverUsername, String message) {
-        if (sender.getUsername().equalsIgnoreCase(receiverUsername)) {
-            sender.sendMessage("Нельзя отправлять личные сообщения самому себе");
-            return;
-        }
+    public void broadcastClientList() {
+        StringBuilder sb = new StringBuilder("/clientlist");
         for (ClientHandler c : clients) {
-            if (c.getUsername().equalsIgnoreCase(receiverUsername)) {
-                c.sendMessage("от " + sender.getUsername() + ": " + message);
-                sender.sendMessage("пользователю " + receiverUsername + ": " + message);
-                return;
-            }
+            sb.append(" ").append(c.getNickname());
         }
-        sender.sendMessage("Пользователь " + receiverUsername + " не в сети");
+
+        String message = sb.toString();
+        for (ClientHandler c : clients) {
+            c.sendMsg(message);
+        }
+    }
+
+    public void subscribe(ClientHandler clientHandler) {
+        clients.add(clientHandler);
+        broadcastClientList();
+    }
+
+    public void unsubscribe(ClientHandler clientHandler) {
+        clients.remove(clientHandler);
+        broadcastClientList();
+    }
+
+    public AuthService getAuthService() {
+        return authService;
     }
 }
